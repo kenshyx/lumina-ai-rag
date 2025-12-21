@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
-import { TabType } from './types';
-import { useTraining, useDataManagement, useModelOptimization, useRAG, useTrainingAnalysis } from './hooks';
+import { useState } from 'react';
+
 import { Header, Navigation, Dashboard, DataTab, RAGTab, SettingsTab } from './components';
+import { useTraining, useDataManagement, useModelOptimization, useRAG, useTrainingAnalysis } from './hooks';
+import { TabType } from './types';
 
 export default function App() {
     const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+    const [chunkSize, setChunkSize] = useState<number>(500);
+    const [chunkOverlap, setChunkOverlap] = useState<number>(50);
 
     // Training state and logic
     const training = useTraining();
@@ -16,7 +19,7 @@ export default function App() {
     const modelOptimization = useModelOptimization();
     
     // RAG functionality
-    const rag = useRAG(dataManagement.ragStatus, dataManagement.files);
+    const rag = useRAG(dataManagement.ragStatus, dataManagement.files, chunkSize, chunkOverlap);
     
     // Training analysis
     const trainingAnalysis = useTrainingAnalysis();
@@ -66,16 +69,9 @@ export default function App() {
           <main className="px-6 pb-32 max-w-4xl mx-auto space-y-6">
               {activeTab === 'dashboard' && (
                 <Dashboard
-                  isTraining={training.isTraining}
-                  setIsTraining={handleSetTraining}
-                  trainingProgress={training.trainingProgress}
-                  currentEpoch={training.currentEpoch}
-                  loss={training.loss}
-                  modelConfig={training.modelConfig}
-                  files={dataManagement.files}
-                  isAnalyzingLoss={trainingAnalysis.isAnalyzing}
-                  analysisResult={trainingAnalysis.analysisResult}
-                  onAnalyzeLoss={() => trainingAnalysis.analyzeLoss(training.loss)}
+                  documentStats={rag.documentStats}
+                  ragStatus={dataManagement.ragStatus}
+                  onRefreshStats={rag.getStats}
                 />
               )}
 
@@ -86,7 +82,25 @@ export default function App() {
                   isGeneratingData={dataManagement.isGeneratingData}
                   isIndexing={dataManagement.isIndexing}
                   ragStatus={dataManagement.ragStatus}
-                  onGenerateSyntheticData={dataManagement.generateSyntheticData}
+                  onGenerateSyntheticData={async () => {
+                    const topic = prompt("What topic should the synthetic data cover?");
+                    if (!topic) return;
+                    
+                    dataManagement.setIsGeneratingData(true);
+                    try {
+                        const content = await rag.generateSyntheticData(topic);
+                        dataManagement.addFile({
+                            name: `synthetic_${topic.replace(/\s+/g, '_')}.txt`,
+                            id: Math.random(),
+                            content
+                        });
+                    } catch (err) {
+                        console.error('Failed to generate synthetic data:', err);
+                        alert('Failed to generate synthetic data. Make sure the model is loaded.');
+                    } finally {
+                        dataManagement.setIsGeneratingData(false);
+                    }
+                  }}
                   onIndexDocuments={() => dataManagement.indexDocuments(rag.indexDocuments)}
                 />
               )}
@@ -101,18 +115,26 @@ export default function App() {
                   onRagQuery={rag.queryRAG}
                   modelLoadingProgress={rag.modelLoadingProgress}
                   isModelLoading={rag.isModelLoading}
+                  canSearch={rag.canSearch}
+                  documentCount={rag.documentStats.totalDocuments}
                 />
               )}
 
               {activeTab === 'settings' && (
                 <SettingsTab
-                  objective={modelOptimization.objective}
-                  setObjective={modelOptimization.setObjective}
-                  modelConfig={training.modelConfig}
-                  setModelConfig={training.setModelConfig}
-                  isOptimizing={modelOptimization.isOptimizing}
-                  analysisResult={modelOptimization.analysisResult}
-                  onOptimizeHyperparameters={handleOptimizeHyperparameters}
+                  chunkSize={chunkSize}
+                  setChunkSize={setChunkSize}
+                  chunkOverlap={chunkOverlap}
+                  setChunkOverlap={setChunkOverlap}
+                  onClearDatabase={async () => {
+                    await rag.clearDatabase();
+                    dataManagement.setRagStatus('Idle');
+                  }}
+                  onClearFiles={() => {
+                    dataManagement.setFiles([]);
+                  }}
+                  documentCount={rag.documentStats.totalDocuments}
+                  fileCount={dataManagement.files.length}
                 />
               )}
           </main>

@@ -1,4 +1,3 @@
-import React from 'react';
 import { NavItemProps } from '../types';
 
 export const NavItem: React.FC<NavItemProps> = ({ id, icon: Icon, label, activeTab, setActiveTab }) => {

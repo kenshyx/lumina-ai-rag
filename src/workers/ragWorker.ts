@@ -1,8 +1,8 @@
 import { HuggingFaceTransformersEmbeddings } from '@langchain/community/embeddings/huggingface_transformers';
-import { VoyVectorStore } from '@langchain/community/vectorstores/voy';
-import { Voy as VoyClient } from 'voy-search';
+import { Document } from '@langchain/core/documents';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { pipeline, env, TextStreamer } from '@huggingface/transformers';
+import * as duckdb from '@duckdb/duckdb-wasm';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -12,69 +12,484 @@ env.allowRemoteModels = true;
 type WorkerRequest = 
     | { type: 'INIT' }
     | { type: 'LOAD_MODEL' }
-    | { type: 'INDEX_DOCUMENTS'; payload: { files: Array<{ name: string; content: string }> } }
+    | { type: 'INDEX_DOCUMENTS'; payload: { files: Array<{ name: string; content: string }>; chunkSize?: number; chunkOverlap?: number } }
     | { type: 'QUERY'; payload: { query: string; chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }> } }
-    | { type: 'CLEAR_MEMORY' };
+    | { type: 'CLEAR_MEMORY' }
+    | { type: 'GET_STATS' }
+    | { type: 'CLEAR_DATABASE' }
+    | { type: 'GENERATE_SYNTHETIC'; payload: { topic: string } };
+
+// Module-level singleton - ONE database instance for entire worker
+let globalDuckDB: duckdb.AsyncDuckDB | null = null;
+let globalDuckDBConnection: any = null;
+let globalDuckDBInitialized = false;
+let globalDuckDBInitializing = false; // Prevent concurrent initialization
+
+// Simple DuckDB vector store
+class DuckDBVectorStore {
+    private embeddings: HuggingFaceTransformersEmbeddings;
+    private tableName: string;
+
+    constructor(embeddings: HuggingFaceTransformersEmbeddings, tableName: string = 'vectors') {
+        this.embeddings = embeddings;
+        this.tableName = tableName;
+    }
+
+    async initialize(): Promise<void> {
+        // Use global singleton - only create once
+        if (globalDuckDBInitialized && globalDuckDB && globalDuckDBConnection) {
+            console.log('[DuckDB] Using existing global database instance - SKIPPING');
+            return;
+        }
+
+        // If already initializing, wait for it to complete
+        if (globalDuckDBInitializing) {
+            console.log('[DuckDB] Already initializing, waiting...');
+            // Wait up to 10 seconds for initialization
+            const maxWait = 10000;
+            const startTime = Date.now();
+            while (globalDuckDBInitializing && !globalDuckDBInitialized && (Date.now() - startTime) < maxWait) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            if (globalDuckDBInitialized && globalDuckDB && globalDuckDBConnection) {
+                console.log('[DuckDB] Initialization completed by another call');
+                return;
+            }
+        }
+
+        // Prevent concurrent initialization
+        if (globalDuckDBInitializing) {
+            throw new Error('Database initialization already in progress');
+        }
+
+        globalDuckDBInitializing = true;
+
+        try {
+            console.log('[DuckDB] ========== CREATING SINGLE DATABASE INSTANCE ==========');
+            console.log('[DuckDB] This should ONLY happen ONCE per worker');
+            console.log('[DuckDB] Current state:', {
+                hasDB: !!globalDuckDB,
+                hasConnection: !!globalDuckDBConnection,
+                isInitialized: globalDuckDBInitialized,
+                isInitializing: globalDuckDBInitializing
+            });
+            
+            // Triple-check after acquiring lock
+            if (globalDuckDBInitialized && globalDuckDB && globalDuckDBConnection) {
+                console.log('[DuckDB] Database was initialized while waiting, using existing');
+                globalDuckDBInitializing = false;
+                return;
+            }
+            
+            // Check if db already exists but not marked as initialized
+            if (globalDuckDB && globalDuckDBConnection) {
+                console.log('[DuckDB] Database already exists, marking as initialized');
+                globalDuckDBInitialized = true;
+                globalDuckDBInitializing = false;
+                return;
+            }
+            
+            // CRITICAL: Only create if absolutely nothing exists
+            if (globalDuckDB) {
+                console.error('[DuckDB] ERROR: globalDuckDB exists but connection is null!');
+                throw new Error('Database exists but connection is missing');
+            }
+            
+            const bundles = duckdb.getJsDelivrBundles();
+            const bundle = await duckdb.selectBundle(bundles);
+            const logger = new duckdb.ConsoleLogger();
+            const worker = await duckdb.createWorker(bundle.mainWorker!);
+            
+            console.log('[DuckDB] Creating AsyncDuckDB instance...');
+            globalDuckDB = new duckdb.AsyncDuckDB(logger, worker);
+            await globalDuckDB.instantiate(bundle.mainModule, bundle.pthreadWorker);
+            
+            // CRITICAL: Check again before opening - NEVER open if connection exists
+            if (globalDuckDBConnection) {
+                console.error('[DuckDB] ERROR: Connection already exists before opening!');
+                console.error('[DuckDB] This means db.open() was called multiple times!');
+                throw new Error('Connection already exists - database was created elsewhere');
+            }
+            
+            // Open in-memory database - ONLY ONCE
+            console.log('[DuckDB] Opening database (this should happen ONCE)...');
+            await globalDuckDB.open({
+                query: {
+                    castBigIntToDouble: true,
+                    castTimestampToDate: true,
+                },
+            });
+            
+            console.log('[DuckDB] Connecting to database...');
+            globalDuckDBConnection = await globalDuckDB.connect();
+            
+            if (!globalDuckDBConnection) {
+                throw new Error('Failed to create connection');
+            }
+            
+            console.log('[DuckDB] Database opened and connected successfully');
+            
+            // Create sequence for auto-increment
+            try {
+                await globalDuckDBConnection.query(`
+                    CREATE SEQUENCE IF NOT EXISTS ${this.tableName}_id_seq START 1
+                `);
+            } catch (err) {
+                // Ignore if sequence already exists
+            }
+            
+            // Create table - ALWAYS create table, even if database was reused
+            try {
+                await globalDuckDBConnection.query(`
+                    CREATE TABLE IF NOT EXISTS ${this.tableName} (
+                        id INTEGER PRIMARY KEY DEFAULT nextval('${this.tableName}_id_seq'),
+                        vector DOUBLE[],
+                        text VARCHAR,
+                        metadata VARCHAR
+                    )
+                `);
+                console.log('[DuckDB] Table created/verified');
+            } catch (err: any) {
+                console.error('[DuckDB] Error creating table:', err);
+                throw err;
+            }
+            
+            // Load from IndexedDB (only on first initialization)
+            if (!globalDuckDBInitialized) {
+                await this.loadFromIndexedDB();
+            }
+            
+            globalDuckDBInitialized = true;
+            console.log('[DuckDB] ========== DATABASE INITIALIZED (SINGLE INSTANCE) ==========');
+        } catch (err) {
+            globalDuckDBInitializing = false;
+            throw err;
+        } finally {
+            globalDuckDBInitializing = false;
+        }
+    }
+
+    async addDocuments(docs: Document[]): Promise<void> {
+        if (!globalDuckDBConnection) {
+            throw new Error('DuckDB not initialized');
+        }
+
+        const texts = docs.map(doc => doc.pageContent);
+        const vectors = await this.embeddings.embedDocuments(texts);
+        
+        for (let i = 0; i < docs.length; i++) {
+            const vectorArray = vectors[i];
+            const metadataStr = JSON.stringify(docs[i].metadata || {});
+            const textContent = docs[i].pageContent.replace(/'/g, "''");
+            const metadataEscaped = metadataStr.replace(/'/g, "''");
+            const vectorLiteral = `[${vectorArray.join(',')}]`;
+            
+            await globalDuckDBConnection.query(`
+                INSERT INTO ${this.tableName} (vector, text, metadata)
+                VALUES (${vectorLiteral}::DOUBLE[], '${textContent}', '${metadataEscaped}')
+            `);
+        }
+        
+        // Save to IndexedDB
+        await this.saveToIndexedDB();
+    }
+
+    async similaritySearch(query: string, k: number): Promise<Document[]> {
+        if (!globalDuckDBConnection) {
+            throw new Error('DuckDB not initialized');
+        }
+
+        const queryVector = await this.embeddings.embedQuery(query);
+        
+        const result = await globalDuckDBConnection.query(`
+            SELECT id, vector, text, metadata
+            FROM ${this.tableName}
+        `);
+        
+        const rows = result.toArray();
+        const similarities = rows.map((row: any) => {
+            const storedVector = Array.isArray(row.vector) ? row.vector : JSON.parse(row.vector || '[]');
+            const similarity = this.cosineSimilarity(queryVector, storedVector);
+            return {
+                text: row.text,
+                metadata: row.metadata,
+                similarity,
+            };
+        });
+        
+        similarities.sort((a: any, b: any) => b.similarity - a.similarity);
+        const topK = similarities.slice(0, k);
+        
+        return topK.map((item: any) => {
+            const metadata = item.metadata ? JSON.parse(item.metadata) : {};
+            return new Document({
+                pageContent: item.text,
+                metadata,
+            });
+        });
+    }
+
+    async getStats(): Promise<{ totalDocuments: number; totalChunks: number; averageChunkLength: number }> {
+        if (!globalDuckDBConnection) {
+            return { totalDocuments: 0, totalChunks: 0, averageChunkLength: 0 };
+        }
+
+        try {
+            const result = await globalDuckDBConnection.query(`
+                SELECT 
+                    COUNT(*) as total_chunks,
+                    AVG(LENGTH(text)) as avg_length
+                FROM ${this.tableName}
+            `);
+            
+            const rows = result.toArray();
+            const stats = rows[0] || { total_chunks: 0, avg_length: 0 };
+            
+            // Get unique file count from metadata
+            const allResult = await globalDuckDBConnection.query(`
+                SELECT metadata
+                FROM ${this.tableName}
+            `);
+            
+            const allRows = allResult.toArray();
+            const uniqueFiles = new Set<string>();
+            allRows.forEach((row: any) => {
+                try {
+                    const metadata = JSON.parse(row.metadata || '{}');
+                    if (metadata.loc?.source) {
+                        uniqueFiles.add(metadata.loc.source);
+                    }
+                } catch (e) {
+                    // Ignore parse errors
+                }
+            });
+            
+            return {
+                totalDocuments: uniqueFiles.size || 0,
+                totalChunks: Number(stats.total_chunks) || 0,
+                averageChunkLength: Math.round(Number(stats.avg_length) || 0),
+            };
+        } catch (err: any) {
+            console.error('[DuckDB] Error getting stats:', err);
+            return { totalDocuments: 0, totalChunks: 0, averageChunkLength: 0 };
+        }
+    }
+
+    async clearDatabase(): Promise<void> {
+        if (!globalDuckDBConnection) {
+            console.warn('[DuckDB] No connection to clear');
+            return;
+        }
+
+        try {
+            // Clear the table
+            await globalDuckDBConnection.query(`DELETE FROM ${this.tableName}`);
+            console.log('[DuckDB] Table cleared');
+            
+            // Reset the sequence
+            try {
+                await globalDuckDBConnection.query(`ALTER SEQUENCE ${this.tableName}_id_seq RESTART WITH 1`);
+            } catch (err) {
+                // Ignore if sequence doesn't exist
+            }
+            
+            // Clear IndexedDB
+            const request = indexedDB.deleteDatabase('LuminaVectorStore');
+            await new Promise<void>((resolve, reject) => {
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {
+                    console.log('[IndexedDB] Database deleted');
+                    resolve();
+                };
+                request.onblocked = () => {
+                    console.warn('[IndexedDB] Delete blocked, will retry');
+                    setTimeout(resolve, 100);
+                };
+            });
+            
+            console.log('[DuckDB] Database and IndexedDB cleared successfully');
+        } catch (err: any) {
+            console.error('[DuckDB] Error clearing database:', err);
+            throw err;
+        }
+    }
+
+    private cosineSimilarity(a: number[], b: number[]): number {
+        if (a.length !== b.length) return 0;
+        let dotProduct = 0;
+        let normA = 0;
+        let normB = 0;
+        for (let i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+        }
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    private async saveToIndexedDB(): Promise<void> {
+        if (!globalDuckDBConnection) return;
+        
+        try {
+            const result = await globalDuckDBConnection.query(`
+                SELECT id, vector, text, metadata
+                FROM ${this.tableName}
+            `);
+            
+            const rows = result.toArray();
+            const data = rows.map((row: any) => ({
+                id: row.id,
+                vector: Array.isArray(row.vector) ? row.vector : JSON.parse(row.vector || '[]'),
+                text: row.text,
+                metadata: row.metadata,
+            }));
+            
+            const request = indexedDB.open('LuminaVectorStore', 1);
+            await new Promise<void>((resolve, reject) => {
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {
+                    const db = request.result;
+                    const transaction = db.transaction(['vectors'], 'readwrite');
+                    const store = transaction.objectStore('vectors');
+                    store.clear();
+                    data.forEach((item: any, idx: number) => {
+                        store.put({ ...item, id: idx + 1 });
+                    });
+                    transaction.oncomplete = () => resolve();
+                    transaction.onerror = () => reject(transaction.error);
+                };
+                request.onupgradeneeded = (event: any) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('vectors')) {
+                        db.createObjectStore('vectors', { keyPath: 'id' });
+                    }
+                };
+            });
+        } catch (err) {
+            console.warn('[DuckDB] Failed to save to IndexedDB:', err);
+        }
+    }
+
+    private async loadFromIndexedDB(): Promise<void> {
+        if (!globalDuckDBConnection) return;
+        
+        try {
+            const request = indexedDB.open('LuminaVectorStore', 1);
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => resolve(request.result);
+                request.onupgradeneeded = (event: any) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('vectors')) {
+                        db.createObjectStore('vectors', { keyPath: 'id' });
+                    }
+                };
+            });
+            
+            const transaction = db.transaction(['vectors'], 'readonly');
+            const store = transaction.objectStore('vectors');
+            const getAllRequest = store.getAll();
+            
+            const data = await new Promise<any[]>((resolve, reject) => {
+                getAllRequest.onsuccess = () => resolve(getAllRequest.result || []);
+                getAllRequest.onerror = () => reject(getAllRequest.error);
+            });
+            
+            if (data.length > 0) {
+                for (const item of data) {
+                    const vectorLiteral = `[${item.vector.join(',')}]`;
+                    const textContent = (item.text || '').replace(/'/g, "''");
+                    const metadataEscaped = (item.metadata || '{}').replace(/'/g, "''");
+                    
+                    await globalDuckDBConnection.query(`
+                        INSERT INTO ${this.tableName} (vector, text, metadata)
+                        VALUES (${vectorLiteral}::DOUBLE[], '${textContent}', '${metadataEscaped}')
+                    `);
+                }
+                console.log(`[DuckDB] Loaded ${data.length} vectors from IndexedDB`);
+            }
+            
+            db.close();
+        } catch (err) {
+            console.warn('[DuckDB] Failed to load from IndexedDB:', err);
+        }
+    }
+}
 
 // Worker state
 let embeddings: HuggingFaceTransformersEmbeddings | null = null;
-let vectorStore: VoyVectorStore | null = null;
-let voyClient: VoyClient | null = null;
+let vectorStore: DuckDBVectorStore | null = null;
 let textSplitter: RecursiveCharacterTextSplitter | null = null;
 let model: any = null;
 let isInitialized = false;
-// Conversation memory - stores previous messages for context
+let isInitializing = false; // Prevent concurrent INIT messages
 let conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
-// Log that worker is loaded
 console.log('[RAG Worker] Worker script loaded');
-
-// Send READY message to main thread
 self.postMessage({ type: 'READY' });
 
-// Message handler
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     const message = event.data;
     const { type } = message;
     const payload = 'payload' in message ? message.payload : undefined;
 
-    console.log('[RAG Worker] Received message:', type, payload);
-
     try {
         switch (type) {
             case 'INIT': {
-                console.log('[RAG Worker] INIT received, isInitialized:', isInitialized);
+                // If already initialized, return immediately
                 if (isInitialized) {
                     console.log('[RAG Worker] Already initialized, sending INIT_SUCCESS');
                     self.postMessage({ type: 'INIT_SUCCESS' });
                     return;
                 }
 
+                // If already initializing, wait for it to complete
+                if (isInitializing) {
+                    console.log('[RAG Worker] Already initializing, waiting for completion...');
+                    // Wait up to 10 seconds for initialization
+                    const maxWait = 10000;
+                    const startTime = Date.now();
+                    while (isInitializing && !isInitialized && (Date.now() - startTime) < maxWait) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    if (isInitialized) {
+                        console.log('[RAG Worker] Initialization completed by another INIT call');
+                        self.postMessage({ type: 'INIT_SUCCESS' });
+                    } else {
+                        self.postMessage({ 
+                            type: 'ERROR', 
+                            payload: { 
+                                error: 'Initialization timeout',
+                                errorType: 'INIT'
+                            } 
+                        });
+                    }
+                    return;
+                }
+
+                // Mark as initializing to prevent concurrent calls
+                isInitializing = true;
+
                 try {
-                    console.log('[RAG Worker] Starting initialization...');
-                    // Initialize text splitter
+                    console.log('[RAG Worker] Starting initialization (this should happen ONCE)...');
+                    
                     textSplitter = new RecursiveCharacterTextSplitter({
                         chunkSize: 500,
                         chunkOverlap: 50,
                     });
-                    console.log('[RAG Worker] Text splitter initialized');
 
-                    // Initialize HuggingFaceTransformersEmbeddings
-                    console.log('[RAG Worker] Initializing embeddings...');
                     embeddings = new HuggingFaceTransformersEmbeddings({
                         model: 'Xenova/all-MiniLM-L6-v2',
                     });
-                    console.log('[RAG Worker] Embeddings initialized');
 
-                    // Initialize VoyClient
-                    console.log('[RAG Worker] Initializing VoyClient...');
-                    voyClient = new VoyClient();
-                    console.log('[RAG Worker] VoyClient initialized');
-
-                    // Initialize VoyVectorStore
-                    console.log('[RAG Worker] Initializing VoyVectorStore...');
-                    vectorStore = new VoyVectorStore(voyClient, embeddings);
-                    console.log('[RAG Worker] VoyVectorStore initialized');
+                    // Only create vector store if it doesn't exist
+                    // CRITICAL: Don't check vectorStore existence here - always initialize
+                    // The DuckDBVectorStore.initialize() has its own guards
+                    if (!vectorStore) {
+                        vectorStore = new DuckDBVectorStore(embeddings);
+                    }
+                    // Always call initialize - it has guards to prevent multiple database creation
+                    await vectorStore.initialize();
 
                     isInitialized = true;
                     console.log('[RAG Worker] Initialization complete, sending INIT_SUCCESS');
@@ -88,6 +503,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                             errorType: 'INIT'
                         } 
                     });
+                } finally {
+                    isInitializing = false;
                 }
                 break;
             }
@@ -98,7 +515,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                     return;
                 }
 
-                // Progress callback for pipeline loading
                 const onProgress = (progress: any) => {
                     let progressValue = 0;
                     if (typeof progress === 'number') {
@@ -125,7 +541,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                     });
                 };
 
-                // Initialize the text generation pipeline
                 model = await pipeline('text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', {
                     device: 'wasm',
                     dtype: 'q8',
@@ -137,7 +552,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
             }
 
             case 'INDEX_DOCUMENTS': {
-                if (!vectorStore || !isInitialized || !textSplitter) {
+                if (!vectorStore || !isInitialized) {
                     self.postMessage({ 
                         type: 'ERROR', 
                         payload: { 
@@ -152,11 +567,24 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                     if (!payload || !('files' in payload)) {
                         throw new Error('Invalid payload for INDEX_DOCUMENTS');
                     }
-                    const { files } = payload;
+                    const { files, chunkSize, chunkOverlap } = payload;
+                    
+                    // Update text splitter with new chunk settings if provided
+                    if (chunkSize !== undefined || chunkOverlap !== undefined) {
+                        textSplitter = new RecursiveCharacterTextSplitter({
+                            chunkSize: chunkSize ?? 500,
+                            chunkOverlap: chunkOverlap ?? 50,
+                        });
+                    } else if (!textSplitter) {
+                        // Create default splitter if it doesn't exist
+                        textSplitter = new RecursiveCharacterTextSplitter({
+                            chunkSize: 500,
+                            chunkOverlap: 50,
+                        });
+                    }
                     
                     for (const file of files) {
                         if (!file.content) {
-                            console.warn(`Skipping file ${file.name} - no content`);
                             continue;
                         }
                         
@@ -195,24 +623,17 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                 }
                 const { query, chatHistory } = payload;
 
-                // If chatHistory is provided, sync it with internal memory (for consistency)
-                // Otherwise, use internal memory and add the new user message
                 if (chatHistory && chatHistory.length > 0) {
                     conversationHistory = [...chatHistory];
                 }
                 
-                // Add new user message to conversation history
                 conversationHistory.push({ role: 'user', content: query });
 
-                // Perform similarity search
                 const results = await vectorStore.similaritySearch(query, 3);
-                
-                // Build context text
                 const contextText = results
                     .map((doc) => doc.pageContent)
                     .join('\n\n');
 
-                // If model is not loaded, return search results only
                 if (!model) {
                     const response = results.length > 0
                         ? results.map((doc, idx) => `[${idx + 1}] ${doc.pageContent}`).join('\n\n')
@@ -228,8 +649,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
                     return;
                 }
 
-                // Build chat prompt with memory (previous conversation) and current context
-                // Use a clear system prompt that establishes roles
                 const systemPrompt = `You are a helpful AI assistant. Your role is to answer questions using ONLY the provided context from the knowledge base. 
 
 IMPORTANT RULES:
@@ -244,7 +663,6 @@ IMPORTANT RULES:
 
                 const chat = [
                     { role: 'system', content: systemPrompt },
-                    // Include previous conversation history (last 6 messages to keep context manageable)
                     ...conversationHistory.slice(-6).map(msg => ({
                         role: msg.role === 'user' ? 'user' : 'assistant',
                         content: msg.content
@@ -257,7 +675,6 @@ IMPORTANT RULES:
                     add_generation_prompt: true 
                 });
 
-                // Accumulate streamed text chunks
                 let streamedText = '';
                 let chunkBuffer = '';
                 let chunkBufferTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -282,33 +699,25 @@ IMPORTANT RULES:
                         streamedText += text;
                         chunkBuffer += text;
                         
-                        // Send chunks more frequently - either when buffer reaches a size or after a short delay
-                        // This batches small chunks together for better performance while keeping it responsive
                         if (chunkBuffer.length >= 20) {
-                            // Flush immediately if buffer is large enough (more content per update)
                             flushChunkBuffer();
                         } else if (!chunkBufferTimeout) {
-                            // Otherwise, flush after a very short delay (batches rapid small chunks)
-                            // Lower delay = faster updates, higher = more batching
                             chunkBufferTimeout = setTimeout(flushChunkBuffer, 50);
                         }
                     }
                 });
                 
-                // Generate response with stricter parameters to reduce hallucinations
                 const output = await model(prompt, {
-                    max_new_tokens: 256, // Increased for more complete answers
-                    temperature: 0.1, // Lower temperature = more focused, less creative/hallucinatory
+                    max_new_tokens: 256,
+                    temperature: 0.1,
                     repetition_penalty: 1.2,
-                    top_p: 0.9, // Nucleus sampling - focus on most likely tokens
+                    top_p: 0.9,
                     streamer,
                     stop: ["<|im_end|>", "Question:", "User question:", "Context:"] 
                 });
                 
-                // Flush any remaining buffered chunks
                 flushChunkBuffer();
-                
-                // Use streamed text if available, otherwise extract from output
+
                 let responseContent = '';
                 if (streamedText) {
                     responseContent = streamedText;
@@ -320,15 +729,12 @@ IMPORTANT RULES:
                         : output?.generated_text || output?.text || String(output);
                 }
                 
-                // Remove the prompt from the response if it's included
                 const cleanResponse = responseContent.startsWith(prompt)
                     ? responseContent.slice(prompt.length).trim()
                     : responseContent.trim();
                 
-                // Add assistant response to conversation history
                 conversationHistory.push({ role: 'assistant', content: cleanResponse });
                 
-                // Keep only last 10 messages in memory to prevent it from growing too large
                 if (conversationHistory.length > 10) {
                     conversationHistory = conversationHistory.slice(-10);
                 }
@@ -349,6 +755,173 @@ IMPORTANT RULES:
                 break;
             }
 
+            case 'GET_STATS': {
+                if (!vectorStore || !isInitialized) {
+                    self.postMessage({ 
+                        type: 'STATS_RESULT', 
+                        payload: { totalDocuments: 0, totalChunks: 0, averageChunkLength: 0 } 
+                    });
+                    return;
+                }
+
+                try {
+                    const stats = await vectorStore.getStats();
+                    self.postMessage({ 
+                        type: 'STATS_RESULT', 
+                        payload: stats 
+                    });
+                } catch (err: any) {
+                    self.postMessage({ 
+                        type: 'ERROR', 
+                        payload: { 
+                            error: err?.message || 'Failed to get stats',
+                            errorType: 'GET_STATS'
+                        } 
+                    });
+                }
+                break;
+            }
+
+            case 'CLEAR_DATABASE': {
+                if (!vectorStore || !isInitialized) {
+                    self.postMessage({ 
+                        type: 'ERROR', 
+                        payload: { 
+                            error: 'Vector store not initialized',
+                            errorType: 'CLEAR_DATABASE'
+                        } 
+                    });
+                    return;
+                }
+
+                try {
+                    await vectorStore.clearDatabase();
+                    // Clear conversation history
+                    conversationHistory = [];
+                    // Refresh stats after clearing
+                    const stats = await vectorStore.getStats();
+                    self.postMessage({ 
+                        type: 'DATABASE_CLEARED',
+                        payload: stats
+                    });
+                } catch (err: any) {
+                    self.postMessage({ 
+                        type: 'ERROR', 
+                        payload: { 
+                            error: err?.message || 'Failed to clear database',
+                            errorType: 'CLEAR_DATABASE'
+                        } 
+                    });
+                }
+                break;
+            }
+
+            case 'GENERATE_SYNTHETIC': {
+                if (!payload || !('topic' in payload)) {
+                    self.postMessage({ 
+                        type: 'ERROR', 
+                        payload: { 
+                            error: 'Invalid payload for GENERATE_SYNTHETIC',
+                            errorType: 'GENERATE_SYNTHETIC'
+                        } 
+                    });
+                    return;
+                }
+
+                const { topic } = payload;
+
+                try {
+                    // Ensure model is loaded
+                    if (!model) {
+                        // Load model if not already loaded
+                        const onProgress = (progress: any) => {
+                            let progressValue = 0;
+                            if (typeof progress === 'number') {
+                                progressValue = progress;
+                            } else if (typeof progress === 'string') {
+                                const match = progress.match(/(\d+)%/);
+                                if (match) {
+                                    progressValue = parseInt(match[1]) / 100;
+                                }
+                            } else if (progress && typeof progress === 'object') {
+                                if (progress.loaded !== undefined && progress.total !== undefined) {
+                                    progressValue = progress.loaded / progress.total;
+                                } else if (progress.progress !== undefined) {
+                                    progressValue = typeof progress.progress === 'number' 
+                                        ? progress.progress 
+                                        : progress.progress / 100;
+                                }
+                            }
+                            
+                            const normalizedProgress = Math.max(0, Math.min(1, progressValue));
+                            self.postMessage({ 
+                                type: 'MODEL_PROGRESS', 
+                                payload: { progress: normalizedProgress } 
+                            });
+                        };
+
+                        model = await pipeline('text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', {
+                            device: 'wasm',
+                            dtype: 'q8',
+                            progress_callback: onProgress,
+                        });
+                    }
+
+                    // Generate synthetic data
+                    const systemPrompt = `You are a helpful assistant that generates training data. Generate 5 diverse training examples for the given topic in a clear, structured format. Each example should be informative and useful.`;
+
+                    const prompt = `Topic: ${topic}\n\nGenerate 5 training examples covering different aspects of this topic. Format each example clearly with a question or instruction and a detailed response.`;
+
+                    const chat = [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: prompt }
+                    ];
+                    
+                    const formattedPrompt = model.tokenizer.apply_chat_template(chat, { 
+                        tokenize: false, 
+                        add_generation_prompt: true 
+                    });
+
+                    const output = await model(formattedPrompt, {
+                        max_new_tokens: 512,
+                        temperature: 0.7,
+                        top_p: 0.9,
+                        do_sample: true,
+                    });
+
+                    let responseContent = '';
+                    if (Array.isArray(output) && output.length > 0) {
+                        responseContent = output[0].generated_text || output[0].text || JSON.stringify(output[0]);
+                    } else if (typeof output === 'string') {
+                        responseContent = output;
+                    } else {
+                        responseContent = output?.generated_text || output?.text || String(output);
+                    }
+
+                    // Remove the prompt from the response
+                    const cleanResponse = responseContent.startsWith(formattedPrompt)
+                        ? responseContent.slice(formattedPrompt.length).trim()
+                        : responseContent.trim();
+
+                    self.postMessage({ 
+                        type: 'SYNTHETIC_GENERATED', 
+                        payload: { 
+                            content: cleanResponse,
+                            topic
+                        } 
+                    });
+                } catch (err: any) {
+                    self.postMessage({ 
+                        type: 'ERROR', 
+                        payload: { 
+                            error: err?.message || 'Failed to generate synthetic data',
+                            errorType: 'GENERATE_SYNTHETIC'
+                        } 
+                    });
+                }
+                break;
+            }
+
             default:
                 self.postMessage({ 
                     type: 'ERROR', 
@@ -365,4 +938,3 @@ IMPORTANT RULES:
         });
     }
 };
-

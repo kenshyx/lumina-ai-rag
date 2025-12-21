@@ -28,8 +28,8 @@ export default defineConfig({
     }),
   ],
   optimizeDeps: {
-    exclude: ['@huggingface/transformers', '@xenova/transformers', 'voy-search'],
-    include: ['p-queue'],
+    exclude: ['@huggingface/transformers', '@xenova/transformers', '@duckdb/duckdb-wasm'],
+    include: ['p-queue', 'apache-arrow'],
     esbuildOptions: {
       alias: {
         'node:module': path.resolve(__dirname, './src/polyfills/node-module.js'),

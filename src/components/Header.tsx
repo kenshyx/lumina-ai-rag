@@ -1,4 +1,3 @@
-import React from 'react';
 import { LuminaLogo } from './LuminaLogo';
 
 interface HeaderProps {
@@ -13,7 +12,7 @@ export const Header: React.FC<HeaderProps> = ({ isTraining }) => (
               <h1 className="text-3xl font-bold tracking-tighter transition-all group-hover:tracking-normal">
                   Lumina <span className="text-blue-400 font-light italic">Trainer</span>
               </h1>
-              <p className="text-white/40 text-[10px] uppercase tracking-widest mt-1">ml5.js × LangChain × Voy</p>
+              <p className="text-white/40 text-[10px] uppercase tracking-widest mt-1">LangChain × DuckDB-WASM × Transformers</p>
           </div>
       </div>
       <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 backdrop-blur-md">

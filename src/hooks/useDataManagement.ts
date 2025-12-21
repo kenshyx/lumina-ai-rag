@@ -1,6 +1,6 @@
 import { useState } from 'react';
+
 import { FileItem } from '../types';
-import { callGemini } from '../utils/gemini';
 
 export const useDataManagement = () => {
     const [files, setFilesState] = useState<FileItem[]>([]);
@@ -27,27 +27,6 @@ export const useDataManagement = () => {
         }
     };
 
-    const generateSyntheticData = async () => {
-        const topic = prompt("What topic should the synthetic data cover?");
-        if (!topic) return;
-
-        setIsGeneratingData(true);
-        try {
-            const result = await callGemini(
-                `Generate 5 training examples for: ${topic} in JSON format [{instruction, response}].`,
-                "Synthetic data engine."
-            );
-            addFile({
-                name: `synthetic_${topic.replace(/\s+/g, '_')}.json`,
-                id: Math.random(),
-                content: result
-            });
-        } catch (err) {
-            console.error('Failed to generate synthetic data:', err);
-        } finally {
-            setIsGeneratingData(false);
-        }
-    };
 
     const indexDocuments = async (ragIndexFunction?: (files: FileItem[]) => Promise<void>) => {
         if (files.length === 0) return;
@@ -84,12 +63,13 @@ export const useDataManagement = () => {
         files,
         setFiles,
         isGeneratingData,
+        setIsGeneratingData,
         isIndexing,
         ragStatus,
+        setRagStatus,
         addFile,
         removeFile,
         handleFileUpload,
-        generateSyntheticData,
         indexDocuments
     };
 };

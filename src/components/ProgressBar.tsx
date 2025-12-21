@@ -1,4 +1,3 @@
-import React from 'react';
 import { ProgressBarProps } from '../types';
 
 export const ProgressBar: React.FC<ProgressBarProps> = ({ progress, color = "bg-blue-500" }) => {

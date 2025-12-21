@@ -1,7 +1,7 @@
-import React from 'react';
 import { Upload, Sparkles, Loader2, FileText, X } from 'lucide-react';
-import { GlassCard } from './GlassCard';
+
 import { FileItem } from '../types';
+import { GlassCard } from './GlassCard';
 
 interface DataTabProps {
     files: FileItem[];
@@ -62,9 +62,9 @@ export const DataTab: React.FC<DataTabProps> = ({
                   }} />
               </button>
               <div className="p-8 bg-blue-500/5 border border-white/5 rounded-[2.5rem] flex flex-col justify-center">
-                  <h4 className="text-xs font-bold uppercase tracking-widest text-blue-400 mb-2">Voy Vector Engine</h4>
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-blue-400 mb-2">DuckDB-WASM Vector Store</h4>
                   <p className="text-[10px] text-white/40 leading-relaxed">
-                      Uploaded documents are split using LangChain and indexed into Voy WASM for instant retrieval.
+                      Documents are chunked with LangChain, embedded with HuggingFace transformers, and indexed into DuckDB-WASM for semantic search. Data persists to IndexedDB.
                   </p>
               </div>
           </div>

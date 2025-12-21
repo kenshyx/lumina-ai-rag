@@ -1,4 +1,5 @@
 import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
+
 import { ChatMessage, FileItem } from '../types';
 
 type WorkerMessage = 
@@ -11,18 +12,27 @@ type WorkerMessage =
     | { type: 'QUERY_RESULT'; payload: { response: string; isFallback: boolean } }
     | { type: 'QUERY_CHUNK'; payload: { chunk: string } }
     | { type: 'MEMORY_CLEARED' }
+    | { type: 'STATS_RESULT'; payload: { totalDocuments: number; totalChunks: number; averageChunkLength: number } }
+    | { type: 'DATABASE_CLEARED'; payload: { totalDocuments: number; totalChunks: number; averageChunkLength: number } }
+    | { type: 'SYNTHETIC_GENERATED'; payload: { content: string; topic: string } }
     | { type: 'ERROR'; payload: { error: string; errorType?: string } };
 
-export const useRAG = (ragStatus: string, files?: FileItem[]) => {
+export const useRAG = (ragStatus: string, files?: FileItem[], chunkSize: number = 500, chunkOverlap: number = 50) => {
     const [chatInput, setChatInput] = useState<string>("");
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
     const [isQuerying, setIsQuerying] = useState<boolean>(false);
     const [modelLoadingProgress, setModelLoadingProgress] = useState<number>(0);
     const [isModelLoading, setIsModelLoading] = useState<boolean>(false);
     const [modelLoadError, setModelLoadError] = useState<string | null>(null);
+    const [documentStats, setDocumentStats] = useState<{ totalDocuments: number; totalChunks: number; averageChunkLength: number }>({
+        totalDocuments: 0,
+        totalChunks: 0,
+        averageChunkLength: 0,
+    });
     
     const workerRef = useRef<Worker | null>(null);
     const isInitializedRef = useRef<boolean>(false);
+    const initSentRef = useRef<boolean>(false); // Track if INIT was sent
     const currentQueryRef = useRef<string>('');
     const streamingResponseRef = useRef<string>('');
 
@@ -48,7 +58,8 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
                 // Handle READY message - send INIT when worker is ready
                 if (message.type === 'READY') {
                     console.log('[useRAG] Worker is ready, sending INIT');
-                    if (workerRef.current && !isInitializedRef.current) {
+                    if (workerRef.current && !isInitializedRef.current && !initSentRef.current) {
+                        initSentRef.current = true;
                         workerRef.current.postMessage({ type: 'INIT' });
                     }
                     return;
@@ -57,7 +68,12 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
                 switch (message.type) {
                 case 'INIT_SUCCESS':
                     isInitializedRef.current = true;
+                    initSentRef.current = false; // Reset for potential re-initialization
                     console.log('RAG worker initialized');
+                    // Fetch stats after initialization
+                    if (workerRef.current) {
+                        workerRef.current.postMessage({ type: 'GET_STATS' });
+                    }
                     break;
 
                 case 'MODEL_LOADED':
@@ -72,6 +88,22 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
 
                 case 'INDEX_COMPLETE':
                     console.log('All documents indexed successfully');
+                    // Refresh stats after indexing
+                    if (workerRef.current) {
+                        workerRef.current.postMessage({ type: 'GET_STATS' });
+                    }
+                    break;
+
+                case 'STATS_RESULT':
+                    setDocumentStats(message.payload);
+                    break;
+
+                case 'DATABASE_CLEARED':
+                    setDocumentStats(message.payload);
+                    setChatHistory([]);
+                    setChatInput("");
+                    streamingResponseRef.current = '';
+                    console.log('Database cleared successfully');
                     break;
 
                 case 'INDEX_PROGRESS':
@@ -149,33 +181,29 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
             };
 
             // Fallback: send INIT after delay if READY doesn't come
-            setTimeout(() => {
-                if (!isInitializedRef.current && workerRef.current) {
+            const timeoutId = setTimeout(() => {
+                if (!isInitializedRef.current && !initSentRef.current && workerRef.current) {
                     console.log('[useRAG] Worker ready timeout, sending INIT anyway');
+                    initSentRef.current = true;
                     workerRef.current.postMessage({ type: 'INIT' });
                 }
             }, 500);
+            
+            // Cleanup function
+            return () => {
+                clearTimeout(timeoutId);
+                if (worker) {
+                    console.log('[useRAG] Terminating worker');
+                    worker.terminate();
+                    workerRef.current = null;
+                    initSentRef.current = false;
+                }
+            };
         } catch (err) {
             console.error('[useRAG] Failed to create worker:', err);
             setModelLoadError('Failed to create worker');
+            return () => {}; // Return empty cleanup
         }
-
-        // Cleanup
-        return () => {
-            if (worker) {
-                console.log('[useRAG] Terminating worker');
-                worker.terminate();
-                workerRef.current = null;
-            }
-        };
-
-        // Cleanup
-        return () => {
-            if (workerRef.current) {
-                workerRef.current.terminate();
-                workerRef.current = null;
-            }
-        };
     }, []);
 
     const addMessage = (role: 'user' | 'assistant', content: string) => {
@@ -183,6 +211,7 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
     };
 
     const indexDocuments = useCallback(async (filesToIndex: FileItem[]): Promise<void> => {
+        // chunkSize and chunkOverlap are captured from closure
         if (!workerRef.current) {
             throw new Error('Worker not created');
         }
@@ -236,7 +265,11 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
             // Send the indexing request
             workerRef.current.postMessage({
                 type: 'INDEX_DOCUMENTS',
-                payload: { files: filesToIndex }
+                payload: { 
+                    files: filesToIndex.map(f => ({ name: f.name, content: f.content || '' })),
+                    chunkSize,
+                    chunkOverlap
+                }
             });
 
             // Timeout after 30 seconds
@@ -247,12 +280,16 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
                 reject(new Error('Indexing timeout'));
             }, 30000);
         });
-    }, []);
+    }, [chunkSize, chunkOverlap]);
 
     const queryRAG = async (e: FormEvent) => {
         e.preventDefault();
         
-        if (!chatInput || isQuerying || ragStatus !== "Knowledge Base Ready") {
+        // Allow searching if documents exist (persisted or newly indexed)
+        const hasDocuments = documentStats.totalChunks > 0;
+        const canSearch = hasDocuments || ragStatus === "Knowledge Base Ready";
+        
+        if (!chatInput || isQuerying || !canSearch) {
             return;
         }
 
@@ -312,6 +349,87 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
         }
     };
 
+    const getStats = useCallback(() => {
+        if (workerRef.current && isInitializedRef.current) {
+            workerRef.current.postMessage({ type: 'GET_STATS' });
+        }
+    }, []);
+
+    const clearDatabase = useCallback(async () => {
+        if (!workerRef.current || !isInitializedRef.current) {
+            console.warn('Cannot clear database: worker not initialized');
+            return;
+        }
+
+        try {
+            workerRef.current.postMessage({ type: 'CLEAR_DATABASE' });
+        } catch (err) {
+            console.error('Failed to clear database:', err);
+        }
+    }, []);
+
+    const generateSyntheticData = useCallback(async (topic: string): Promise<string> => {
+        if (!workerRef.current) {
+            throw new Error('Worker not created');
+        }
+
+        // Wait for initialization if not ready yet
+        if (!isInitializedRef.current) {
+            const maxWait = 10000;
+            const startTime = Date.now();
+            const checkInterval = 100;
+            
+            while (!isInitializedRef.current && (Date.now() - startTime) < maxWait) {
+                await new Promise(resolve => setTimeout(resolve, checkInterval));
+            }
+            
+            if (!isInitializedRef.current) {
+                throw new Error('Worker not initialized');
+            }
+        }
+
+        return new Promise<string>((resolve, reject) => {
+            if (!workerRef.current) {
+                reject(new Error('Worker not available'));
+                return;
+            }
+
+            const messageHandler = (event: MessageEvent<WorkerMessage>) => {
+                const message = event.data;
+                
+                if (message.type === 'SYNTHETIC_GENERATED') {
+                    if (workerRef.current) {
+                        workerRef.current.removeEventListener('message', messageHandler);
+                    }
+                    resolve(message.payload.content);
+                } else if (message.type === 'ERROR' && message.payload.errorType === 'GENERATE_SYNTHETIC') {
+                    if (workerRef.current) {
+                        workerRef.current.removeEventListener('message', messageHandler);
+                    }
+                    reject(new Error(message.payload.error));
+                }
+            };
+
+            workerRef.current.addEventListener('message', messageHandler);
+
+            workerRef.current.postMessage({
+                type: 'GENERATE_SYNTHETIC',
+                payload: { topic }
+            });
+
+            setTimeout(() => {
+                if (workerRef.current) {
+                    workerRef.current.removeEventListener('message', messageHandler);
+                }
+                reject(new Error('Synthetic data generation timeout'));
+            }, 60000); // 60 second timeout for generation
+        });
+    }, []);
+
+
+    // Check if search is available (has documents or status is ready)
+    const canSearch = documentStats.totalChunks > 0 || ragStatus === "Knowledge Base Ready";
+
     return {
         chatInput,
         setChatInput,
@@ -321,6 +439,11 @@ export const useRAG = (ragStatus: string, files?: FileItem[]) => {
         clearChat,
         indexDocuments,
         modelLoadingProgress,
-        isModelLoading
+        isModelLoading,
+        documentStats,
+        getStats,
+        canSearch,
+        clearDatabase,
+        generateSyntheticData,
     };
 };

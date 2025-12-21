@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+
 import { ModelConfig } from '../types';
 
 const DEFAULT_MODEL_CONFIG: ModelConfig = {

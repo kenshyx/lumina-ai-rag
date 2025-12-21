@@ -1,7 +1,8 @@
-import React, { FormEvent } from 'react';
+import { FormEvent } from 'react';
 import { Search, BrainCircuit, Send } from 'lucide-react';
-import { GlassCard } from './GlassCard';
+
 import { ChatMessage } from '../types';
+import { GlassCard } from './GlassCard';
 import { ProgressBar } from './ProgressBar';
 
 interface RAGTabProps {
@@ -13,6 +14,8 @@ interface RAGTabProps {
     onRagQuery: (e: FormEvent) => void;
     modelLoadingProgress: number;
     isModelLoading: boolean;
+    canSearch: boolean;
+    documentCount: number;
 }
 
 export const RAGTab: React.FC<RAGTabProps> = ({
@@ -23,17 +26,25 @@ export const RAGTab: React.FC<RAGTabProps> = ({
     isQuerying,
     onRagQuery,
     modelLoadingProgress,
-    isModelLoading
+    isModelLoading,
+    canSearch,
+    documentCount
 }) => (
   <GlassCard className="p-6 flex flex-col h-[600px]">
       <div className="flex justify-between items-center mb-6 shrink-0">
           <h3 className="text-xs font-bold flex items-center gap-2 uppercase tracking-widest text-white/40"><Search size={18}/> RAG Knowledge Assistant</h3>
-          <div className="px-3 py-1.5 bg-blue-500/10 text-blue-400 rounded-full text-[9px] font-bold border border-blue-500/20">Active Index: {ragStatus}</div>
+          <div className={`px-3 py-1.5 rounded-full text-[9px] font-bold border ${
+            canSearch 
+              ? 'bg-green-500/10 text-green-400 border-green-500/20' 
+              : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+          }`}>
+            {canSearch ? `${documentCount} Document${documentCount !== 1 ? 's' : ''} Ready` : ragStatus}
+          </div>
       </div>
       {isModelLoading && (
         <div className="mb-4 space-y-2">
           <div className="flex justify-between items-center text-[10px] text-white/60">
-            <span>Downloading ChatWebLLM model...</span>
+            <span>Loading text generation model...</span>
             <span>{Math.round(modelLoadingProgress * 100)}%</span>
           </div>
           <ProgressBar progress={modelLoadingProgress * 100} color="bg-indigo-500" />
@@ -43,8 +54,12 @@ export const RAGTab: React.FC<RAGTabProps> = ({
           {chatHistory.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center opacity-20 py-12">
                 <BrainCircuit size={56} className="mb-4 text-blue-400" />
-                <p className="text-sm font-bold">Vector Store Standby</p>
-                <p className="text-[10px] mt-2 italic px-8">Your local knowledge base is searched using LangChain retrieval strategies once indexed.</p>
+                <p className="text-sm font-bold">Vector Store {canSearch ? 'Ready' : 'Standby'}</p>
+                <p className="text-[10px] mt-2 italic px-8">
+                    {canSearch 
+                        ? `Your knowledge base contains ${documentCount} document${documentCount !== 1 ? 's' : ''}. Ask a question to search.`
+                        : 'Upload and index documents to build your knowledge base.'}
+                </p>
             </div>
           ) : (
             chatHistory.map((m, i) => (
@@ -73,13 +88,13 @@ export const RAGTab: React.FC<RAGTabProps> = ({
           <input
             value={chatInput}
             onChange={e => setChatInput(e.target.value)}
-            disabled={ragStatus !== "Knowledge Base Ready"}
-            className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-xs outline-none focus:ring-2 focus:ring-blue-500/40 transition-all placeholder:text-white/10"
-            placeholder={ragStatus === "Knowledge Base Ready" ? "Query the vector store..." : "Complete indexing to start chatting"}
+            disabled={!canSearch}
+            className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-xs outline-none focus:ring-2 focus:ring-blue-500/40 transition-all placeholder:text-white/10 disabled:opacity-50"
+            placeholder={canSearch ? "Query your knowledge base..." : "Index documents to start searching"}
           />
           <button
             type="submit"
-            disabled={!chatInput || isQuerying || ragStatus !== "Knowledge Base Ready"}
+            disabled={!chatInput || isQuerying || !canSearch}
             className="p-4 bg-blue-600 hover:bg-blue-500 cursor-pointer active:scale-90 rounded-2xl transition-all disabled:opacity-20 shadow-lg shadow-blue-900/20"
           >
               <Send size={22}/>

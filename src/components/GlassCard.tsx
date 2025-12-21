@@ -1,4 +1,3 @@
-import React from 'react';
 import { GlassCardProps } from '../types';
 
 export const GlassCard: React.FC<GlassCardProps> = ({ children, className = "" }) => (

@@ -1,5 +1,5 @@
-import React from 'react';
 import { Activity, Database, Settings, Search } from 'lucide-react';
+
 import { TabType } from '../types';
 import { GlassCard } from './GlassCard';
 import { NavItem } from './NavItem';
