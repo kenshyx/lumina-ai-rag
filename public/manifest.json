@@ -1,0 +1,76 @@
+{
+  "name": "Lumina RAG",
+  "short_name": "Lumina RAG",
+  "description": "A local RAG (Retrieval-Augmented Generation) system with DuckDB-WASM vector storage and local AI models",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#3b82f6",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/lumina.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities", "education"],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Search Knowledge Base",
+      "short_name": "Search",
+      "description": "Query your indexed documents",
+      "url": "/?tab=rag",
+      "icons": [
+        {
+          "src": "/lumina.svg",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Upload Documents",
+      "short_name": "Upload",
+      "description": "Add documents to your knowledge base",
+      "url": "/?tab=data",
+      "icons": [
+        {
+          "src": "/lumina.svg",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ],
+  "share_target": {
+    "action": "/?tab=data",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "file",
+          "accept": ["text/plain", "text/markdown", "application/pdf", ".txt", ".md", ".pdf"]
+        }
+      ]
+    }
+  }
+}
+

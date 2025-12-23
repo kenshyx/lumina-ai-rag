@@ -110,7 +110,7 @@ export const useDataManagement = (): UseDataManagementReturn => {
             } else {
                 // Fallback: simulate indexing delay if RAG not available
                 await new Promise(resolve => setTimeout(resolve, 1500));
-                setRagStatus("Knowledge Base Ready");
+            setRagStatus("Knowledge Base Ready");
             }
         } catch (err) {
             const error = err instanceof Error ? err : new Error(String(err));

@@ -5,12 +5,12 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ progress, color = "bg-
   const clampedProgress = Math.max(0, Math.min(100, progress));
   
   return (
-    <div className="w-full bg-white/5 rounded-full h-2 overflow-hidden">
+  <div className="w-full bg-white/5 rounded-full h-2 overflow-hidden">
       <div
         className={`h-full ${color} transition-all duration-300 ease-out`}
         style={{ width: `${clampedProgress}%`, minWidth: clampedProgress > 0 ? '2px' : '0px' }}
       />
-    </div>
-  );
+  </div>
+);
 };
 

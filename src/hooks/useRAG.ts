@@ -383,7 +383,7 @@ export const useRAG = (ragStatus: string, files?: FileItem[], chunkSize: number 
                 
                 // Wait a bit for model to start loading, then proceed with query
                 // The query will wait for model if needed
-            } catch (err) {
+        } catch (err) {
                 const error = err instanceof Error ? err : new Error(String(err));
                 setIsModelLoading(false);
                 setModelLoadError(`Failed to start model loading: ${error.message}`);
@@ -402,7 +402,7 @@ export const useRAG = (ragStatus: string, files?: FileItem[], chunkSize: number 
             payload: { 
                 query: userMessage,
                 chatHistory: chatHistory.slice(0, -1) // Send all but the current user message
-            }
+        }
         });
     };
 

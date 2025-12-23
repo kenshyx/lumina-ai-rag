@@ -105,13 +105,13 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <div className="flex items-center gap-2 mb-4">
                     <Scissors size={18} className="text-blue-400" />
                     <h3 className="text-lg font-bold">Chunking Configuration</h3>
-                </div>
+      </div>
 
                 <div className="space-y-6">
-                    <div className="space-y-3">
+          <div className="space-y-3">
                         <label className="text-[10px] text-white/30 uppercase font-bold tracking-[0.2em]">Chunk Size</label>
                         <div className="space-y-2">
-                            <input
+              <input
                                 type="number"
                                 min="100"
                                 max="2000"
@@ -119,16 +119,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                 value={chunkSize}
                                 onChange={e => setChunkSize(Math.max(100, Math.min(2000, parseInt(e.target.value) || 500)))}
                                 className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-mono text-blue-400 outline-none focus:border-blue-500/40 transition-all"
-                            />
+              />
                             <p className="text-xs text-white/40">Number of characters per chunk (100-2000)</p>
                         </div>
-                    </div>
+          </div>
 
-                    <div className="space-y-3">
+              <div className="space-y-3">
                         <label className="text-[10px] text-white/30 uppercase font-bold tracking-[0.2em]">Chunk Overlap</label>
                         <div className="space-y-2">
-                            <input
-                                type="number"
+                  <input
+                    type="number"
                                 min="0"
                                 max={Math.floor(chunkSize * 0.5)}
                                 step="10"
@@ -194,7 +194,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                     <p className="text-sm font-semibold">Uploaded Files</p>
                                     <p className="text-xs text-white/40">{fileCount} file{fileCount !== 1 ? 's' : ''} staged</p>
                                 </div>
-                            </div>
+              </div>
                             <button
                                 onClick={() => setShowClearConfirm('files')}
                                 disabled={fileCount === 0 || isClearing}
@@ -203,8 +203,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                 <Trash2 size={14} />
                                 Clear
                             </button>
-                        </div>
-                    </div>
+              </div>
+          </div>
 
                     <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-2xl">
                         <div className="flex items-center justify-between mb-3">
@@ -215,17 +215,17 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                     <p className="text-xs text-white/40">Clear everything</p>
                                 </div>
                             </div>
-                            <button
+                    <button
                                 onClick={() => setShowClearConfirm('all')}
                                 disabled={isClearing}
                                 className="px-4 py-2 bg-red-600/20 text-red-300 border border-red-500/30 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-red-600/30 cursor-pointer active:scale-95 transition-all disabled:opacity-20 disabled:cursor-not-allowed flex items-center gap-2"
                             >
                                 <RotateCcw size={14} />
                                 Reset All
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                    </button>
+              </div>
+          </div>
+      </div>
 
                 {showClearConfirm && (
                     <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-2xl">
@@ -275,9 +275,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                 Cancel
                             </button>
                         </div>
-                    </div>
-                )}
-            </GlassCard>
         </div>
-    );
+      )}
+  </GlassCard>
+        </div>
+);
 };

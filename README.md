@@ -36,6 +36,14 @@ A modern, browser-based RAG (Retrieval-Augmented Generation) application for bui
 - **Data Management**: Clear indexed documents, uploaded files, or reset everything
 - **Search Availability**: Automatically detects persisted documents for immediate searching
 
+### 📱 Progressive Web App (PWA)
+- **Installable**: Install Lumina RAG as a standalone app on your device
+- **Offline Support**: Cached assets work offline (models require initial download)
+- **App-like Experience**: Runs in standalone mode without browser UI
+- **Install Button**: One-click install prompt in the header when available
+- **Service Worker**: Automatic caching of static assets for faster loads
+- **Share Target**: Accept files shared from other apps (mobile)
+
 ## 🛠️ Tech Stack
 
 ### Core
@@ -115,6 +123,12 @@ A modern, browser-based RAG (Retrieval-Augmented Generation) application for bui
 - You can ask follow-up questions that reference previous messages
 - Memory is automatically managed (last 10 messages)
 
+### 7. Install as PWA (Optional)
+- Look for the **Install App** button in the header (when available)
+- Click to install Lumina RAG as a standalone app
+- Works on desktop and mobile devices
+- Provides app-like experience with offline support
+
 ## 🏗️ Architecture
 
 ### Web Worker Implementation
@@ -184,10 +198,15 @@ lumina-rag/
 │   ├── workers/             # Web Workers
 │   │   └── ragWorker.ts     # RAG operations worker (indexing, querying, generation)
 │   ├── utils/               # Utility functions
-│   │   └── gemini.ts        # Gemini API client (for training analysis)
+│   │   ├── gemini.ts        # Gemini API client (for training analysis)
+│   │   └── serviceWorker.ts # Service worker registration utilities
 │   ├── polyfills/           # Browser polyfills
 │   ├── types.ts             # TypeScript type definitions
 │   └── constants.ts         # Application constants
+├── public/                  # Static assets
+│   ├── manifest.json        # PWA manifest
+│   ├── sw.js                # Service worker
+│   └── lumina.svg           # App icon
 ├── .editorconfig            # Editor configuration
 ├── .prettierrc.json         # Prettier configuration
 ├── vite.config.js           # Vite configuration
@@ -236,6 +255,13 @@ lumina-rag/
 - Lazy model loading
 - Singleton database pattern
 
+### Progressive Web App
+- Service worker for offline asset caching
+- Install prompt detection and handling
+- Standalone app mode support
+- Share target API for file sharing (mobile)
+- Automatic cache management and updates
+
 ## 🐛 Troubleshooting
 
 ### Model Loading Issues
@@ -261,6 +287,13 @@ lumina-rag/
 - Consider splitting very large files
 - Model loading is one-time per session
 - Adjust chunk size for better performance vs. context
+
+### PWA Installation Issues
+- Install button only appears when browser supports PWA installation
+- Some browsers require HTTPS for PWA installation (localhost works in development)
+- Service worker only registers in production builds
+- Clear browser cache if service worker updates don't apply
+- Icon files (icon-192.png, icon-512.png) are optional but recommended for better PWA experience
 
 ## 📄 License
 
